@@ -1,187 +1,171 @@
 #include "helpers.h"
+#include "offsets.h"
 #include "rtti.h"
-#include <spdlog/spdlog.h>
 #include <algorithm>
+#include <spdlog/spdlog.h> // تأكد من وجود مكتبة spdlog أو استبدلها بـ printf
 
-namespace roblox {
+namespace process::helpers {
 
-    auto Instance::is_valid() const -> bool {
-        return m_address != 0 && m_address > 0x10000 && m_address < 0x7FFFFFFFFFFF;
-    }
+    auto Instance::is_valid() const -> bool { return m_address != 0; }
 
-    auto Instance::get_address() const -> uint64_t {
-        return m_address;
-    }
-
-
-    // 1. الحصول على الاسم (ديناميكياً عبر البحث عن SSO String)
     auto Instance::get_name() const -> std::optional<std::string> {
-        if (!is_valid()) return std::nullopt;
-
-        // محاولة القراءة باستخدام الأوفست الافتراضي أولاً (Name = 0x48)
-        auto name_ptr = process::Memory::read<uintptr_t>(m_address + 0x48);
-        if (name_ptr && *name_ptr > 0x10000) {
-            auto name = process::Memory::read_sso_string(*name_ptr);
-            if (name) return name;
+        if (!is_valid()) {
+            return std::nullopt;
         }
 
-        // إذا فشل، يمكن استخدام RTTI Scan للبحث عن أوفست الاسم (اختياري للأداء)
-        return std::nullopt;
+        const auto name_pointer =
+            process::Memory::read<uintptr_t>(m_address + offsets::Instance::Name);
+        if (!name_pointer) {
+            return std::nullopt;
+        }
+
+        return process::Memory::read_sso_string(*name_pointer);
     }
 
-    // 2. الحصول على اسم الكلاس (باستخدام محرك الـ RTTI الخاص بك)
     auto Instance::get_class_name() const -> std::optional<std::string> {
-        if (!is_valid()) return std::nullopt;
-
-        // نستخدم كلاس Rtti الذي عرفته أنت في مشروعك لعمل Scan مباشر
-        auto rtti_info = process::Rtti::scan_rtti(m_address);
-        if (rtti_info) {
-            return rtti_info->name;
+        if (!is_valid()) {
+            return std::nullopt;
         }
 
-        // كخطة بديلة (Fallback) نستخدم الأوفست التقليدي من الـ Descriptor
-        auto descriptor = process::Memory::read<uintptr_t>(m_address + 0x18);
-        if (descriptor && *descriptor > 0x10000) {
-            auto class_name_ptr = process::Memory::read<uintptr_t>(*descriptor + 0x18);
-            if (class_name_ptr) return process::Memory::read_sso_string(*class_name_ptr);
+        const auto class_descriptor =
+            process::Memory::read<uintptr_t>(m_address + offsets::Instance::ClassDescriptor);
+
+        if (!class_descriptor) {
+            return std::nullopt;
         }
 
-        return std::nullopt;
+        const auto class_name_pointer =
+            process::Memory::read<uintptr_t>(*class_descriptor + offsets::Instance::ClassName);
+
+        if (!class_name_pointer) {
+            return std::nullopt;
+        }
+
+        return process::Memory::read_sso_string(*class_name_pointer);
     }
 
-    // 3. الحصول على الأب (باستخدام المنطق الديناميكي لضمان التوافق)
-    auto Instance::get_parent() const -> std::optional<Instance> {
-        if (!is_valid()) return std::nullopt;
-
-        static uintptr_t dynamic_parent_offset = 0;
-
-        // إذا لم نجد الأوفست بعد، نبحث عنه مرة واحدة
-        if (dynamic_parent_offset == 0) {
-            for (uintptr_t off = 0x10; off < 0x120; off += 8) {
-                auto potential_parent = process::Memory::read<uintptr_t>(m_address + off);
-                if (!potential_parent || *potential_parent < 0x10000) continue;
-
-                // نتحقق إذا كان الكائن الحالي موجود في أبناء هذا الأب المحتمل
-                Instance test_parent(*potential_parent);
-                auto children = test_parent.get_children();
-                for (const auto& child : children) {
-                    if (child.get_address() == m_address) {
-                        dynamic_parent_offset = off;
-                        break;
-                    }
-                }
-                if (dynamic_parent_offset != 0) break;
-            }
-        }
-
-        uintptr_t target_offset = (dynamic_parent_offset != 0) ? dynamic_parent_offset : 0x60;
-        auto parent_addr = process::Memory::read<uintptr_t>(m_address + target_offset);
-
-        if (parent_addr && *parent_addr > 0x10000)
-            return Instance(*parent_addr);
-
-        return std::nullopt;
-    }
-
-    // 4. الحصول على الأبناء (تم دمج منطق الـ Vector والـ Syscalls)
     auto Instance::get_children() const -> std::vector<Instance> {
         std::vector<Instance> children;
-        if (!is_valid()) return children;
 
-        // الأوفست الافتراضي للـ Children Vector هو 0x50
-        auto children_vector_ptr = process::Memory::read<uintptr_t>(m_address + 0x50);
-        if (!children_vector_ptr || *children_vector_ptr < 0x10000) return children;
+        if (!is_valid()) {
+            return children;
+        }
 
-        // في x64 الـ Vector يتكون من: [Start PTR][End PTR][Capacity PTR]
-        auto start = process::Memory::read<uintptr_t>(*children_vector_ptr);
-        auto end = process::Memory::read<uintptr_t>(*children_vector_ptr + 8);
+        const auto start =
+            process::Memory::read<uintptr_t>(m_address + offsets::Instance::ChildrenStart);
+        if (!start) {
+            return children;
+        }
 
-        if (!start || !end || *start == 0 || *end <= *start) return children;
+        const auto end = process::Memory::read<uintptr_t>(*start + offsets::Instance::ChildrenEnd);
+        if (!end) {
+            return children;
+        }
 
-        uintptr_t current = *start;
-        uintptr_t finish = *end;
+        auto current = process::Memory::read<uintptr_t>(*start);
+        if (!current) {
+            return children;
+        }
 
-        // تحديد الحد الأقصى لعدد الأبناء لمنع التعليق
-        size_t count = (finish - current) / 16;
-        if (count > 10000) count = 10000;
+        constexpr size_t MAX = 8192;
+        size_t iterations = 0;
+        auto current_addr = *current;
+        const auto end_addr = *end;
 
-        for (size_t i = 0; i < count; ++i) {
-            auto child_inst_ptr = process::Memory::read<uintptr_t>(current);
-            if (child_inst_ptr && *child_inst_ptr > 0x10000) {
-                children.emplace_back(*child_inst_ptr);
+        while (current_addr != end_addr && iterations < MAX) {
+            auto child_addr = process::Memory::read<uintptr_t>(current_addr);
+            if (child_addr && *child_addr) {
+                children.emplace_back(*child_addr);
             }
-            current += 16; // قفزة بمقدار 16 بايت (shared_ptr structure)
+
+            current_addr += 0x10;
+            ++iterations;
         }
 
         return children;
     }
 
+    auto Instance::get_parent() const -> std::optional<Instance> {
+        return process::Memory::read<Instance>(m_address + offsets::Instance::Parent);
+    }
+
     auto Instance::find_first_child(std::string_view name) const -> std::optional<Instance> {
-        for (const auto& child : get_children()) {
-            if (auto child_name = child.get_name(); child_name && *child_name == name)
-                return child;
+        if (!is_valid()) {
+            return std::nullopt;
         }
+
+        for (const auto& child : get_children()) {
+            const auto child_name = child.get_name();
+            if (child_name && *child_name == name) {
+                return child;
+            }
+        }
+
         return std::nullopt;
     }
-}
 
-namespace process::helpers {
-
+    auto Instance::get_address() const -> std::uint64_t { return m_address; };
+    ///////////////////////////////////////////////////////////////////////////////////
     auto find_pointer_by_rtti(std::string_view section_name,
-        const std::vector<std::string>& class_names,
-        size_t alignment)
+        const std::vector<std::string>& class_names, size_t alignment)
         -> std::unordered_map<std::string, std::optional<size_t>> {
-
         std::unordered_map<std::string, std::optional<size_t>> results;
         std::unordered_map<std::string, std::vector<uintptr_t>> all_matches;
 
-        auto section = g_process.get_section(section_name);
+        for (const auto& class_name : class_names) {
+            results[class_name] = std::nullopt;
+            all_matches[class_name] = {};
+        }
+
+        auto section = process::g_process.get_section(section_name);
         if (!section) {
-            spdlog::error("Section {} not found!", section_name);
+            spdlog::error("Failed to find section: {}", section_name);
             return results;
         }
 
         auto [section_start, section_size] = *section;
-        uintptr_t module_base = g_process.get_module_base();
+        auto module_base = process::g_process.get_module_base();
 
-        // قراءة السيكشن بالكامل لتسريع عملية المسح
-        auto buffer = Memory::read_bytes(section_start, section_size);
-        if (buffer.empty()) return results;
+        for (size_t offset = 0; offset < section_size; offset += alignment) {
+            auto potential_ptr = process::Memory::read<uintptr_t>(section_start + offset);
+            if (!potential_ptr || *potential_ptr < 0x10000) {
+                continue;
+            }
 
-        for (size_t offset = 0; offset <= buffer.size() - sizeof(uintptr_t); offset += alignment) {
-            uintptr_t potential_ptr = *reinterpret_cast<uintptr_t*>(&buffer[offset]);
-            if (potential_ptr < 0x10000) continue;
+            auto rtti = process::Rtti::scan_rtti(*potential_ptr);
+            if (!rtti) {
+                continue;
+            }
 
-            auto rtti = Rtti::scan_rtti(potential_ptr);
-            if (!rtti) continue;
-
-            for (const auto& target : class_names) {
-                bool match = (rtti->name == target);
-                // فحص الكلاسات الموروثة أيضاً
-                if (!match) {
-                    for (const auto& base : rtti->base_classes) {
-                        if (base == target) { match = true; break; }
-                    }
-                }
-
-                if (match) {
-                    all_matches[target].push_back((section_start + offset) - module_base);
+            for (const auto& class_name : class_names) {
+                if (rtti->name == class_name) {
+                    size_t final_offset = (section_start + offset) - module_base;
+                    all_matches[class_name].push_back(final_offset);
                 }
             }
         }
 
-        for (const auto& name : class_names) {
-            auto& matches = all_matches[name];
-            if (matches.empty()) continue;
+        for (const auto& class_name : class_names) {
+            auto& matches = all_matches[class_name];
 
-            // منطق خاص للـ DataModel
-            if (name == "DataModel" || name == "DataModel@RBX") {
-                std::sort(matches.begin(), matches.end(), std::greater<uintptr_t>());
-                if (matches.size() >= 2) results[name] = matches[1];
-                else results[name] = matches[0];
+            if (matches.empty()) {
+                spdlog::warn("Failed to find class: {}", class_name);
+                continue;
+            }
+
+            if (class_name == "DataModel@RBX") {
+                std::sort(matches.begin(), matches.end(),
+                    [](uintptr_t a, uintptr_t b) { return a > b; });
+
+                if (matches.size() >= 2) {
+                    results[class_name] = matches[1];
+                }
+                else {
+                    spdlog::warn("Found DataModel but not enough instances");
+                }
             }
             else {
-                results[name] = matches[0];
+                results[class_name] = matches[0];
             }
         }
 
@@ -192,16 +176,25 @@ namespace process::helpers {
         size_t max_offset, size_t alignment, bool direct)
         -> std::optional<size_t> {
         for (size_t offset = 0; offset < max_offset; offset += alignment) {
-            uintptr_t addr = base_address + offset;
-            if (!direct) {
-                auto ptr = Memory::read<uintptr_t>(addr);
-                if (!ptr || *ptr < 0x10000) continue;
-                addr = *ptr;
+            if (direct) {
+                auto str = Memory::read_sso_string(base_address + offset);
+                if (str && *str == target_string) {
+                    return offset;
+                }
             }
+            else {
+                auto string_ptr = Memory::read<uintptr_t>(base_address + offset);
+                if (!string_ptr || *string_ptr < 0x10000) {
+                    continue;
+                }
 
-            auto str = Memory::read_sso_string(addr);
-            if (str && *str == target_string) return offset;
+                auto str = Memory::read_sso_string(*string_ptr);
+                if (str && *str == target_string) {
+                    return offset;
+                }
+            }
         }
+
         return std::nullopt;
     }
 
@@ -209,16 +202,91 @@ namespace process::helpers {
         size_t max_offset, size_t alignment, size_t max_string_length,
         bool direct) -> std::optional<size_t> {
         for (size_t offset = 0; offset < max_offset; offset += alignment) {
-            uintptr_t addr = base_address + offset;
-            if (!direct) {
-                auto ptr = Memory::read<uintptr_t>(addr);
-                if (!ptr || *ptr < 0x10000) continue;
-                addr = *ptr;
+            if (direct) {
+                auto str = Memory::read_string(base_address + offset, max_string_length);
+                if (str && *str == target_string) {
+                    return offset;
+                }
+            }
+            else {
+                auto string_ptr = Memory::read<uintptr_t>(base_address + offset);
+                if (!string_ptr || *string_ptr < 0x10000) {
+                    continue;
+                }
+
+                auto str = Memory::read_string(*string_ptr, max_string_length);
+                if (str && *str == target_string) {
+                    return offset;
+                }
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    auto find_string_by_regex(uintptr_t base_address, const std::string& regex_pattern,
+        size_t max_offset, size_t alignment, size_t max_string_length,
+        bool direct) -> std::optional<size_t> {
+        std::regex pattern(regex_pattern);
+
+        for (size_t offset = 0; offset < max_offset; offset += alignment) {
+            if (direct) {
+                auto str = Memory::read_string(base_address + offset, max_string_length);
+                if (str && std::regex_match(*str, pattern)) {
+                    return offset;
+                }
+            }
+            else {
+                auto string_ptr = Memory::read<uintptr_t>(base_address + offset);
+                if (!string_ptr || *string_ptr < 0x10000) {
+                    continue;
+                }
+
+                auto str = Memory::read_string(*string_ptr, max_string_length);
+                if (str && std::regex_match(*str, pattern)) {
+                    return offset;
+                }
+            }
+        }
+
+        return std::nullopt;
+    }
+
+    auto find_pointer_offset(uintptr_t base_address, uintptr_t target_pointer, size_t max_offset,
+        size_t alignment) -> std::optional<size_t> {
+        for (size_t offset = 0; offset < max_offset; offset += alignment) {
+            auto ptr = Memory::read<uintptr_t>(base_address + offset);
+            if (ptr && *ptr == target_pointer) {
+                return offset;
+            }
+        }
+        return std::nullopt;
+    }
+
+    auto find_color3_offset(const std::vector<uintptr_t>& addresses,
+        std::function<std::tuple<uint8_t, uint8_t, uint8_t>(size_t)> get_rgb,
+        size_t max_offset) -> std::optional<size_t> {
+        for (size_t offset = 0; offset < max_offset; offset += 1) {
+            bool all_match = true;
+
+            for (size_t i = 0; i < addresses.size(); i++) {
+                auto [exp_r, exp_g, exp_b] = get_rgb(i);
+
+                auto r = Memory::read<uint8_t>(addresses[i] + offset);
+                auto g = Memory::read<uint8_t>(addresses[i] + offset + 1);
+                auto b = Memory::read<uint8_t>(addresses[i] + offset + 2);
+
+                if (!r || !g || !b || *r != exp_r || *g != exp_g || *b != exp_b) {
+                    all_match = false;
+                    break;
+                }
             }
 
-            auto str = Memory::read_string(addr, max_string_length);
-            if (str && *str == target_string) return offset;
+            if (all_match) {
+                return offset;
+            }
         }
+
         return std::nullopt;
     }
 
