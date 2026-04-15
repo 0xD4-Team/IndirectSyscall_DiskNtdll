@@ -12,6 +12,11 @@
 #include <regex>
 #include <cstdint>
 
+#include <mutex>
+
+
+
+
 
 
 #include "memory.h" // لضمان الوصول لـ Memory و Process الخاص بك
@@ -47,6 +52,35 @@ namespace process::helpers {
     private:
         std::uint64_t m_address = 0;
     };
+
+    struct OffsetEntry {
+        std::string name;
+        size_t offset;
+    };
+
+    class OffsetManager {
+    public:
+        auto start() -> bool;
+        auto add_offset(const std::string& namespace_name, const std::string& offset_name,
+            size_t offset) -> void;
+        auto get_offset(const std::string& namespace_name, const std::string& offset_name) const
+            -> std::optional<size_t>;
+
+        std::unordered_map<std::string, std::vector<OffsetEntry>> m_offsets;
+
+
+    private:
+   
+        mutable std::mutex m_offset_mutex;
+    };
+
+    inline uintptr_t g_visual_engine;
+    inline uintptr_t g_data_model_addr;
+    inline uintptr_t g_team_addr;
+
+    inline Instance g_data_model;
+    inline std::optional<Instance> g_lighting;
+    inline std::optional<Instance> g_workspace;
 
     auto find_pointer_by_rtti(std::string_view section_name,
         const std::vector<std::string>& class_names, size_t alignment = 8)
