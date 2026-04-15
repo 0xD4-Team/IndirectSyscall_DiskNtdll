@@ -18,14 +18,7 @@ namespace roblox {
     class Instance {
     public:
         // الأوفستات الافتراضية لروبلوكس (تأكد من تحديثها إذا تغيرت نسخة اللعبة)
-        struct Offsets {
-            static inline uintptr_t ClassDescriptor = 0x18;
-            static inline uintptr_t Parent = 0x60;
-            static inline uintptr_t Name = 0x48;
-            static inline uintptr_t ClassName = 0x18; // داخل ClassDescriptor
-            static inline uintptr_t ChildrenStart = 0x50;
-            static inline uintptr_t ChildrenEnd = 0x8;  // أوفست من ChildrenStart
-        };
+
 
         Instance() = default;
         explicit Instance(uint64_t address) : m_address(address) {};
