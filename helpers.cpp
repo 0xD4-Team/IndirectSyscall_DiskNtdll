@@ -289,5 +289,46 @@ namespace process::helpers {
 
         return std::nullopt;
     }
+    auto start() -> bool {
+        g_data_model = process::helpers::Instance(g_data_model_addr);
+        g_lighting = g_data_model.find_first_child_of_class("Lighting");
+        g_workspace = g_data_model.find_first_child_of_class("Workspace");
+
+
+
+        std::vector<std::thread> threads;
+
+
+
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        return true;
+        }
+
+    auto OffsetManager::add_offset(const std::string& namespace_name, const std::string& offset_name,
+        size_t offset) -> void {
+        std::lock_guard<std::mutex> lock(m_offset_mutex);
+        m_offsets[namespace_name].push_back({ offset_name, offset });
+        spdlog::info("Added offset: {}::{} = 0x{:X}", namespace_name, offset_name, offset);
+    }
+
+    auto OffsetManager::get_offset(const std::string& namespace_name, const std::string& offset_name) const
+        -> std::optional<size_t> {
+        std::lock_guard<std::mutex> lock(m_offset_mutex);
+        auto it = m_offsets.find(namespace_name);
+        if (it == m_offsets.end()) {
+            return std::nullopt;
+        }
+
+        for (const auto& entry : it->second) {
+            if (entry.name == offset_name) {
+                return entry.offset;
+            }
+        }
+
+        return std::nullopt;
+    }
 
 } // namespace process::helpers
