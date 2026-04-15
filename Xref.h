@@ -17,26 +17,21 @@ namespace process {
     public:
         Xref();
 
-        // البحث عن مراجع لعنوان معين في الذاكرة
         auto scan(uintptr_t address) const -> std::vector<uintptr_t>;
 
-        // البحث عن تعليمة برمجية بناءً على شرط معين (predicate)
         auto instruction_scan(
-            uintptr_t start,
-            const std::vector<uint8_t>& buffer,
-            const std::function<bool(const ZydisDecodedInstruction&, const ZydisDecodedOperand*)>& predicate
-        ) const -> std::optional<InstructionMatch>;
+            uintptr_t start, const std::vector<uint8_t>& buffer,
+            const std::function<bool(const ZydisDecodedInstruction&, const ZydisDecodedOperand*)>&
+            predicate) const -> std::optional<InstructionMatch>;
 
     private:
-        auto decode(const uint8_t* buffer, size_t length,
-            ZydisDecodedInstruction& out_instruction,
+        auto decode(const uint8_t* buffer, size_t length, ZydisDecodedInstruction& out_instruction,
             ZydisDecodedOperand* out_operands) const -> bool;
 
     private:
         ZydisDecoder m_decoder;
     };
 
-    // تعريف كائن عمومي للاستخدام في المشروع
     inline Xref g_xref;
 
 } // namespace process
