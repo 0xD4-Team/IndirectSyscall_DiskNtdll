@@ -6,61 +6,113 @@
 namespace roblox {
 
     auto Instance::is_valid() const -> bool {
-        return m_address != 0 && m_address > 0x10000;
+        return m_address != 0 && m_address > 0x10000 && m_address < 0x7FFFFFFFFFFF;
     }
 
     auto Instance::get_address() const -> uint64_t {
         return m_address;
     }
 
+
+    // 1. الحصول على الاسم (ديناميكياً عبر البحث عن SSO String)
     auto Instance::get_name() const -> std::optional<std::string> {
         if (!is_valid()) return std::nullopt;
-        auto name_ptr = process::Memory::read<uintptr_t>(m_address + Offsets::Name);
-        if (!name_ptr || *name_ptr < 0x10000) return std::nullopt;
-        return process::Memory::read_sso_string(*name_ptr);
+
+        // محاولة القراءة باستخدام الأوفست الافتراضي أولاً (Name = 0x48)
+        auto name_ptr = process::Memory::read<uintptr_t>(m_address + 0x48);
+        if (name_ptr && *name_ptr > 0x10000) {
+            auto name = process::Memory::read_sso_string(*name_ptr);
+            if (name) return name;
+        }
+
+        // إذا فشل، يمكن استخدام RTTI Scan للبحث عن أوفست الاسم (اختياري للأداء)
+        return std::nullopt;
     }
 
+    // 2. الحصول على اسم الكلاس (باستخدام محرك الـ RTTI الخاص بك)
     auto Instance::get_class_name() const -> std::optional<std::string> {
         if (!is_valid()) return std::nullopt;
-        auto descriptor = process::Memory::read<uintptr_t>(m_address + Offsets::ClassDescriptor);
-        if (!descriptor || *descriptor < 0x10000) return std::nullopt;
 
-        auto class_name_ptr = process::Memory::read<uintptr_t>(*descriptor + Offsets::ClassName);
-        if (!class_name_ptr || *class_name_ptr < 0x10000) return std::nullopt;
+        // نستخدم كلاس Rtti الذي عرفته أنت في مشروعك لعمل Scan مباشر
+        auto rtti_info = process::Rtti::scan_rtti(m_address);
+        if (rtti_info) {
+            return rtti_info->name;
+        }
 
-        return process::Memory::read_sso_string(*class_name_ptr);
+        // كخطة بديلة (Fallback) نستخدم الأوفست التقليدي من الـ Descriptor
+        auto descriptor = process::Memory::read<uintptr_t>(m_address + 0x18);
+        if (descriptor && *descriptor > 0x10000) {
+            auto class_name_ptr = process::Memory::read<uintptr_t>(*descriptor + 0x18);
+            if (class_name_ptr) return process::Memory::read_sso_string(*class_name_ptr);
+        }
+
+        return std::nullopt;
     }
 
+    // 3. الحصول على الأب (باستخدام المنطق الديناميكي لضمان التوافق)
     auto Instance::get_parent() const -> std::optional<Instance> {
         if (!is_valid()) return std::nullopt;
-        auto parent_addr = process::Memory::read<uintptr_t>(m_address + Offsets::Parent);
-        if (!parent_addr || *parent_addr < 0x10000) return std::nullopt;
-        return Instance(*parent_addr);
+
+        static uintptr_t dynamic_parent_offset = 0;
+
+        // إذا لم نجد الأوفست بعد، نبحث عنه مرة واحدة
+        if (dynamic_parent_offset == 0) {
+            for (uintptr_t off = 0x10; off < 0x120; off += 8) {
+                auto potential_parent = process::Memory::read<uintptr_t>(m_address + off);
+                if (!potential_parent || *potential_parent < 0x10000) continue;
+
+                // نتحقق إذا كان الكائن الحالي موجود في أبناء هذا الأب المحتمل
+                Instance test_parent(*potential_parent);
+                auto children = test_parent.get_children();
+                for (const auto& child : children) {
+                    if (child.get_address() == m_address) {
+                        dynamic_parent_offset = off;
+                        break;
+                    }
+                }
+                if (dynamic_parent_offset != 0) break;
+            }
+        }
+
+        uintptr_t target_offset = (dynamic_parent_offset != 0) ? dynamic_parent_offset : 0x60;
+        auto parent_addr = process::Memory::read<uintptr_t>(m_address + target_offset);
+
+        if (parent_addr && *parent_addr > 0x10000)
+            return Instance(*parent_addr);
+
+        return std::nullopt;
     }
 
+    // 4. الحصول على الأبناء (تم دمج منطق الـ Vector والـ Syscalls)
     auto Instance::get_children() const -> std::vector<Instance> {
         std::vector<Instance> children;
         if (!is_valid()) return children;
 
-        auto children_ptr = process::Memory::read<uintptr_t>(m_address + Offsets::ChildrenStart);
-        if (!children_ptr || *children_ptr < 0x10000) return children;
+        // الأوفست الافتراضي للـ Children Vector هو 0x50
+        auto children_vector_ptr = process::Memory::read<uintptr_t>(m_address + 0x50);
+        if (!children_vector_ptr || *children_vector_ptr < 0x10000) return children;
 
-        auto start = process::Memory::read<uintptr_t>(*children_ptr);
-        auto end = process::Memory::read<uintptr_t>(*children_ptr + Offsets::ChildrenEnd);
+        // في x64 الـ Vector يتكون من: [Start PTR][End PTR][Capacity PTR]
+        auto start = process::Memory::read<uintptr_t>(*children_vector_ptr);
+        auto end = process::Memory::read<uintptr_t>(*children_vector_ptr + 8);
 
-        if (!start || !end || *start == 0) return children;
+        if (!start || !end || *start == 0 || *end <= *start) return children;
 
         uintptr_t current = *start;
-        uintptr_t last = *end;
+        uintptr_t finish = *end;
 
-        // حماية: روبلوكس قد يحتوي على آلاف الأبناء، نضع حداً لمنع تجميد البرنامج
-        for (int i = 0; i < 10000 && current < last; ++i) {
-            auto child_inst = process::Memory::read<uintptr_t>(current);
-            if (child_inst && *child_inst > 0x10000) {
-                children.emplace_back(*child_inst);
+        // تحديد الحد الأقصى لعدد الأبناء لمنع التعليق
+        size_t count = (finish - current) / 16;
+        if (count > 10000) count = 10000;
+
+        for (size_t i = 0; i < count; ++i) {
+            auto child_inst_ptr = process::Memory::read<uintptr_t>(current);
+            if (child_inst_ptr && *child_inst_ptr > 0x10000) {
+                children.emplace_back(*child_inst_ptr);
             }
-            current += 16; // x64 vector padding (shared_ptr size)
+            current += 16; // قفزة بمقدار 16 بايت (shared_ptr structure)
         }
+
         return children;
     }
 
